@@ -4,12 +4,14 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const MAX_ITEMS = 220
-const TRON_GRID = 'https://api.trongrid.io'
+const TRONSCAN_BLOCK_API = 'https://apilist.tronscanapi.com/api/block'
+const TRONSCAN_API_KEY = process.env.TRONSCAN_API_KEY || ''
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
 }
 
+// 从哈希末尾往前找两位连续数字，反转后在 00-35 内作为开奖结果
 function parseHashOpenNumber(hash) {
   const text = String(hash || '').toLowerCase()
 
@@ -36,47 +38,81 @@ function parseHashOpenNumber(hash) {
   return null
 }
 
-async function postJson(url, body = {}) {
+async function fetchTronScan(url) {
   const res = await fetch(url, {
-    method: 'POST',
     cache: 'no-store',
     headers: {
-      accept: 'application/json',
-      'content-type': 'application/json',
+      accept: 'application/json,text/plain,*/*',
       'user-agent': 'Mozilla/5.0',
+      ...(TRONSCAN_API_KEY
+        ? { 'TRON-PRO-API-KEY': TRONSCAN_API_KEY }
+        : {}),
     },
-    body: JSON.stringify(body),
   })
 
   const text = await res.text()
-  if (!res.ok) throw new Error(`波场接口失败：${url}`)
-  if (!text.trim()) throw new Error(`波场接口返回空：${url}`)
-  if (text.trim().startsWith('<')) throw new Error(`波场接口返回网页：${url}`)
+
+  if (!res.ok) throw new Error(`TronScan接口失败：${url}`)
+  if (!text.trim()) throw new Error(`TronScan接口返回空内容：${url}`)
+  if (text.trim().startsWith('<')) throw new Error(`TronScan接口返回网页：${url}`)
 
   return JSON.parse(text)
 }
 
-async function getNowBlock() {
-  const json = await postJson(`${TRON_GRID}/wallet/getnowblock`, {})
+function pickBlockItem(json) {
+  if (Array.isArray(json?.data)) return json.data[0]
+  if (Array.isArray(json?.rows)) return json.rows[0]
+  if (Array.isArray(json)) return json[0]
+  return json
+}
 
-  const blockNumber =
-    json?.block_header?.raw_data?.number ||
-    json?.blockHeader?.raw_data?.number ||
-    json?.number
+function getBlockNumberFromItem(item) {
+  return Number(
+    item?.number ??
+    item?.block ??
+    item?.blockNumber ??
+    item?.height ??
+    item?.block_header?.raw_data?.number ??
+    0
+  )
+}
 
-  if (!Number.isInteger(Number(blockNumber))) {
-    throw new Error('没有获取到波场当前区块号')
+function getHashFromItem(item) {
+  return String(
+    item?.hash ??
+    item?.blockHash ??
+    item?.blockID ??
+    item?.blockId ??
+    ''
+  )
+}
+
+async function getLatestBlock() {
+  const json = await fetchTronScan(
+    `${TRONSCAN_BLOCK_API}?sort=-number&limit=1&_t=${Date.now()}`
+  )
+
+  const item = pickBlockItem(json)
+  const blockNumber = getBlockNumberFromItem(item)
+  const hash = getHashFromItem(item)
+
+  if (!Number.isInteger(blockNumber) || blockNumber <= 0) {
+    throw new Error('TronScan没有返回最新区块号')
   }
 
-  return Number(blockNumber)
+  return {
+    blockNumber,
+    hash,
+  }
 }
 
 async function getBlockHash(block) {
-  const json = await postJson(`${TRON_GRID}/wallet/getblockbynum`, {
-    num: Number(block),
-  })
+  const json = await fetchTronScan(
+    `${TRONSCAN_BLOCK_API}?number=${Number(block)}&_t=${Date.now()}`
+  )
 
-  return String(json?.blockID || json?.blockId || json?.hash || '')
+  const item = pickBlockItem(json)
+  return getHashFromItem(item)
 }
 
 async function mapLimit(items, limit, mapper) {
@@ -96,9 +132,10 @@ async function mapLimit(items, limit, mapper) {
 
 export async function GET() {
   try {
-    const currentBlock = await getNowBlock()
+    const latestBlockData = await getLatestBlock()
+    const currentBlock = latestBlockData.blockNumber
 
-    // 只取 00 / 20 / 40 / 60 / 80 区块
+    // 只取 00 / 20 / 40 / 60 / 80 的开奖区块
     const latestFixedBlock = currentBlock - (currentBlock % 20)
     const nextBlock = latestFixedBlock + 20
     const remainBlocks = Math.max(0, nextBlock - currentBlock)
@@ -107,12 +144,18 @@ export async function GET() {
       return latestFixedBlock - index * 20
     })
 
-    const rawBlocks = await mapLimit(blocks, 8, async (block) => {
+    const rawBlocks = await mapLimit(blocks, 6, async (block) => {
       try {
         const hash = await getBlockHash(block)
-        return { block, hash }
+        return {
+          block,
+          hash,
+        }
       } catch {
-        return { block, hash: '' }
+        return {
+          block,
+          hash: '',
+        }
       }
     })
 
@@ -134,13 +177,13 @@ export async function GET() {
       .filter(Boolean)
 
     if (!history.length) {
-      throw new Error('没有解析到波场固定开奖区块')
+      throw new Error('没有解析到 00/20/40/60/80 固定开奖区块哈希')
     }
 
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
-      source: 'trongrid',
+      source: 'tronscan',
       currentBlock,
       latestFixedBlock,
       latest: history[0],
@@ -154,9 +197,11 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: error.message || '获取波场哈希数据失败',
+        message: error.message || '获取TronScan波场区块数据失败',
       },
-      { status: 500 }
+      {
+        status: 500,
+      }
     )
   }
 }
