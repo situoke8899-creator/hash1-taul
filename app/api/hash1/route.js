@@ -4,13 +4,14 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const MAX_ITEMS = 220
-const TRON_NOW_BLOCK = 'https://api.trongrid.io/wallet/getnowblock'
+const TRON_NOW_BLOCK = 'https://api.trongrid.io/walletsolidity/getnowblock'
 const TRON_BLOCK_BY_NUM = 'https://api.trongrid.io/wallet/getblockbynum'
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
 }
 
+// 从哈希最后往前找两位连续数字，反转后 00-35 为开奖结果
 function parseHashOpenNumber(hash) {
   const text = String(hash || '').toLowerCase()
 
@@ -25,10 +26,10 @@ function parseHashOpenNumber(hash) {
 
       if (Number.isInteger(value) && value >= 0 && value < 36) {
         return {
+          sourcePair,
           openCode: openCode.padStart(2, '0'),
           value,
           tail: value % 10,
-          sourcePair,
         }
       }
     }
@@ -66,23 +67,23 @@ async function getNowBlock() {
     json?.blockHeader?.raw_data?.number ||
     json?.number
 
-  const blockID = json?.blockID || json?.blockId || ''
-
   return {
     blockNumber: Number(blockNumber),
-    blockID: String(blockID || ''),
+    hash: String(json?.blockID || json?.blockId || ''),
   }
 }
 
 async function getBlockByNum(block) {
   try {
-    const json = await postJson(TRON_BLOCK_BY_NUM, { num: Number(block) })
+    const json = await postJson(TRON_BLOCK_BY_NUM, {
+      num: Number(block),
+    })
 
     return {
       block: Number(block),
       hash: String(json?.blockID || json?.blockId || ''),
     }
-  } catch {
+  } catch (error) {
     return {
       block: Number(block),
       hash: '',
@@ -126,7 +127,6 @@ export async function GET() {
     const history = rawBlocks
       .map((item) => {
         const parsed = parseHashOpenNumber(item.hash)
-
         if (!parsed) return null
 
         return {
@@ -145,15 +145,13 @@ export async function GET() {
       throw new Error('没有解析到固定开奖区块哈希')
     }
 
-    const latest = history[0]
-
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
       source: 'trongrid',
       currentBlock: now.blockNumber,
       latestFixedBlock,
-      latest,
+      latest: history[0],
       nextBlock,
       remainBlocks,
       countdownSeconds: remainBlocks * 3,
@@ -166,9 +164,7 @@ export async function GET() {
         ok: false,
         message: error.message || '获取波场哈希1分轮盘数据失败',
       },
-      {
-        status: 500,
-      }
+      { status: 500 }
     )
   }
 }
