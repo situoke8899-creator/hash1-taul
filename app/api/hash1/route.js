@@ -4,14 +4,12 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const MAX_ITEMS = 220
-const TRON_NOW_BLOCK = 'https://api.trongrid.io/walletsolidity/getnowblock'
-const TRON_BLOCK_BY_NUM = 'https://api.trongrid.io/wallet/getblockbynum'
+const TRON_GRID = 'https://api.trongrid.io'
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
 }
 
-// 从哈希最后往前找两位连续数字，反转后 00-35 为开奖结果
 function parseHashOpenNumber(hash) {
   const text = String(hash || '').toLowerCase()
 
@@ -52,15 +50,15 @@ async function postJson(url, body = {}) {
 
   const text = await res.text()
 
-  if (!res.ok) throw new Error(`波场接口请求失败：${url}`)
-  if (!text.trim()) throw new Error(`波场接口返回空内容：${url}`)
-  if (text.trim().startsWith('<')) throw new Error(`波场接口返回网页：${url}`)
+  if (!res.ok) throw new Error(`接口请求失败：${url}`)
+  if (!text.trim()) throw new Error(`接口返回空内容：${url}`)
+  if (text.trim().startsWith('<')) throw new Error(`接口返回网页：${url}`)
 
   return JSON.parse(text)
 }
 
 async function getNowBlock() {
-  const json = await postJson(TRON_NOW_BLOCK)
+  const json = await postJson(`${TRON_GRID}/wallet/getnowblock`, {})
 
   const blockNumber =
     json?.block_header?.raw_data?.number ||
@@ -75,15 +73,15 @@ async function getNowBlock() {
 
 async function getBlockByNum(block) {
   try {
-    const json = await postJson(TRON_BLOCK_BY_NUM, {
+    const json = await postJson(`${TRON_GRID}/wallet/getblockbynum`, {
       num: Number(block),
     })
 
     return {
       block: Number(block),
-      hash: String(json?.blockID || json?.blockId || ''),
+      hash: String(json?.blockID || json?.blockId || json?.hash || ''),
     }
-  } catch (error) {
+  } catch {
     return {
       block: Number(block),
       hash: '',
