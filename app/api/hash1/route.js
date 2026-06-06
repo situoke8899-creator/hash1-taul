@@ -3,8 +3,9 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-const HX_HISTORY_URL = 'https://hx168.live/api/Game/GetLong?gameId=1'
 const MAX_ITEMS = 220
+const TRON_NOW_BLOCK = 'https://api.trongrid.io/wallet/getnowblock'
+const TRON_BLOCK_BY_NUM = 'https://api.trongrid.io/wallet/getblockbynum'
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
@@ -22,7 +23,7 @@ function parseHashOpenNumber(hash) {
       const openCode = `${right}${left}`
       const value = Number(openCode)
 
-      if (value >= 0 && value < 36) {
+      if (Number.isInteger(value) && value >= 0 && value < 36) {
         return {
           openCode: openCode.padStart(2, '0'),
           value,
@@ -36,27 +37,8 @@ function parseHashOpenNumber(hash) {
   return null
 }
 
-async function fetchJson(url, options = {}) {
-  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`, {
-    cache: 'no-store',
-    headers: {
-      accept: 'application/json,text/plain,*/*',
-      'user-agent': 'Mozilla/5.0',
-      ...(options.headers || {}),
-    },
-    ...options,
-  })
-
-  const text = await res.text()
-  if (!res.ok) throw new Error(`接口请求失败：${url}`)
-  if (!text.trim()) throw new Error(`接口返回空内容：${url}`)
-  if (text.trim().startsWith('<')) throw new Error(`接口返回网页，不是 JSON：${url}`)
-
-  return JSON.parse(text)
-}
-
-async function fetchTronBlockHash(blockNumber) {
-  const res = await fetch('https://api.trongrid.io/wallet/getblockbynum', {
+async function postJson(url, body = {}) {
+  const res = await fetch(url, {
     method: 'POST',
     cache: 'no-store',
     headers: {
@@ -64,63 +46,100 @@ async function fetchTronBlockHash(blockNumber) {
       'content-type': 'application/json',
       'user-agent': 'Mozilla/5.0',
     },
-    body: JSON.stringify({ num: Number(blockNumber) }),
+    body: JSON.stringify(body),
   })
 
   const text = await res.text()
-  if (!res.ok || !text.trim()) return ''
 
-  const json = JSON.parse(text)
-  return String(json?.blockID || '')
+  if (!res.ok) throw new Error(`波场接口请求失败：${url}`)
+  if (!text.trim()) throw new Error(`波场接口返回空内容：${url}`)
+  if (text.trim().startsWith('<')) throw new Error(`波场接口返回网页：${url}`)
+
+  return JSON.parse(text)
 }
 
-function normalizeHxRows(json) {
-  const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : []
+async function getNowBlock() {
+  const json = await postJson(TRON_NOW_BLOCK)
 
-  return rows
-    .map((item) => ({
-      block: Number(item.block || item.blockNumber || item.height || 0),
-    }))
-    .filter((item) => Number.isInteger(item.block) && item.block > 0)
+  const blockNumber =
+    json?.block_header?.raw_data?.number ||
+    json?.blockHeader?.raw_data?.number ||
+    json?.number
+
+  const blockID = json?.blockID || json?.blockId || ''
+
+  return {
+    blockNumber: Number(blockNumber),
+    blockID: String(blockID || ''),
+  }
 }
 
-async function buildFixedHistory(latestFixedBlock) {
-  const history = []
+async function getBlockByNum(block) {
+  try {
+    const json = await postJson(TRON_BLOCK_BY_NUM, { num: Number(block) })
 
-  for (let i = 0; i < MAX_ITEMS; i++) {
-    const block = latestFixedBlock - i * 20
-    const hash = await fetchTronBlockHash(block)
-    const parsed = parseHashOpenNumber(hash)
+    return {
+      block: Number(block),
+      hash: String(json?.blockID || json?.blockId || ''),
+    }
+  } catch {
+    return {
+      block: Number(block),
+      hash: '',
+    }
+  }
+}
 
-    if (!parsed) continue
+async function mapLimit(items, limit, mapper) {
+  const result = []
+  let index = 0
 
-    history.push({
-      block,
-      hash,
-      sourcePair: parsed.sourcePair,
-      openCode: parsed.openCode,
-      value: parsed.value,
-      tail: parsed.tail,
-      parsedByHash: true,
-    })
+  async function worker() {
+    while (index < items.length) {
+      const currentIndex = index++
+      result[currentIndex] = await mapper(items[currentIndex], currentIndex)
+    }
   }
 
-  return history
+  await Promise.all(Array.from({ length: limit }, worker))
+  return result
 }
 
 export async function GET() {
   try {
-    const json = await fetchJson(HX_HISTORY_URL)
-    const rawRows = normalizeHxRows(json)
+    const now = await getNowBlock()
 
-    if (!rawRows.length) {
-      throw new Error('没有获取到哈希1分轮盘区块数据')
+    if (!Number.isInteger(now.blockNumber) || now.blockNumber <= 0) {
+      throw new Error('没有获取到波场当前区块')
     }
 
-    const maxBlock = Math.max(...rawRows.map((item) => item.block))
-    const latestFixedBlock = Math.floor(maxBlock / 20) * 20
+    const latestFixedBlock = Math.floor(now.blockNumber / 20) * 20
+    const nextBlock = latestFixedBlock + 20
+    const remainBlocks = Math.max(0, nextBlock - now.blockNumber)
 
-    const history = await buildFixedHistory(latestFixedBlock)
+    const blocks = Array.from({ length: MAX_ITEMS }, (_, index) => {
+      return latestFixedBlock - index * 20
+    })
+
+    const rawBlocks = await mapLimit(blocks, 8, getBlockByNum)
+
+    const history = rawBlocks
+      .map((item) => {
+        const parsed = parseHashOpenNumber(item.hash)
+
+        if (!parsed) return null
+
+        return {
+          block: item.block,
+          hash: item.hash,
+          sourcePair: parsed.sourcePair,
+          openCode: parsed.openCode,
+          value: parsed.value,
+          tail: parsed.tail,
+          parsedByHash: true,
+        }
+      })
+      .filter(Boolean)
 
     if (!history.length) {
       throw new Error('没有解析到固定开奖区块哈希')
@@ -131,9 +150,13 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
-      source: 'hx168.live + trongrid',
+      source: 'trongrid',
+      currentBlock: now.blockNumber,
+      latestFixedBlock,
       latest,
-      nextBlock: Number(latest.block) + 20,
+      nextBlock,
+      remainBlocks,
+      countdownSeconds: remainBlocks * 3,
       history,
       updatedAt: new Date().toISOString(),
     })
@@ -141,9 +164,11 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: error.message || '获取哈希1分轮盘数据失败',
+        message: error.message || '获取波场哈希1分轮盘数据失败',
       },
-      { status: 500 }
+      {
+        status: 500,
+      }
     )
   }
 }
