@@ -10,7 +10,6 @@ function isDigit(ch) {
   return ch >= '0' && ch <= '9'
 }
 
-// 规则：从哈希最后往前找两位连续数字，把两位反过来，反转后的数字在 00-35 内即为开奖结果。
 export function parseHashOpenNumber(hash) {
   const text = String(hash || '').toLowerCase()
 
@@ -38,7 +37,7 @@ export function parseHashOpenNumber(hash) {
 }
 
 async function fetchJson(url, options = {}) {
-  const res = await fetch(url, {
+  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`, {
     cache: 'no-store',
     headers: {
       accept: 'application/json,text/plain,*/*',
@@ -49,9 +48,11 @@ async function fetchJson(url, options = {}) {
   })
 
   const text = await res.text()
+
   if (!res.ok) throw new Error(`接口请求失败：${url}`)
   if (!text.trim()) throw new Error(`接口返回空内容：${url}`)
   if (text.trim().startsWith('<')) throw new Error(`接口返回网页，不是 JSON：${url}`)
+
   return JSON.parse(text)
 }
 
@@ -59,14 +60,22 @@ async function fetchTronBlockHash(blockNumber) {
   const num = Number(blockNumber)
   if (!Number.isInteger(num) || num <= 0) return ''
 
-  // TronGrid 钱包接口：返回 blockID 作为区块哈希。失败时会自动回退到平台已给结果。
   try {
-    const json = await fetchJson('https://api.trongrid.io/wallet/getblockbynum', {
+    const res = await fetch('https://api.trongrid.io/wallet/getblockbynum', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      cache: 'no-store',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'user-agent': 'Mozilla/5.0',
+      },
       body: JSON.stringify({ num }),
     })
 
+    const text = await res.text()
+    if (!res.ok || !text.trim() || text.trim().startsWith('<')) return ''
+
+    const json = JSON.parse(text)
     return String(json?.blockID || json?.blockId || json?.hash || '')
   } catch (error) {
     console.log(`获取区块哈希失败 ${num}:`, error.message)
@@ -77,45 +86,58 @@ async function fetchTronBlockHash(blockNumber) {
 function normalizeHxRows(json) {
   const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : []
 
-  return rows
-    .map((item, index) => ({
-      index,
-      block: Number(item.block || item.blockNumber || item.height || 0),
-      hash: String(item.hash || item.blockHash || item.hashCode || item.block_hash || ''),
-      platformNum: Number(item.num ?? item.openCode ?? item.result ?? NaN),
-      wei: Number(item.wei ?? 0),
-      playType: Number(item.playType ?? 0),
-      raw: item,
-    }))
-    .filter((item) => Number.isInteger(item.block) && item.block > 0)
+  const fixedMap = new Map()
+
+  rows.forEach((item, index) => {
+    const block = Number(item.block || item.blockNumber || item.height || 0)
+
+    if (!Number.isInteger(block) || block <= 0) return
+
+    // 哈希1分轮盘固定开奖区块：每20个区块开奖一次
+    // 只保留 83372000、83371980、83371960 这种区块
+    if (block % 20 !== 0) return
+
+    if (!fixedMap.has(block)) {
+      fixedMap.set(block, {
+        index,
+        block,
+        hash: String(item.hash || item.blockHash || item.hashCode || item.block_hash || ''),
+        platformNum: Number(item.num ?? item.openCode ?? item.result ?? NaN),
+        wei: Number(item.wei ?? 0),
+        playType: Number(item.playType ?? 0),
+        raw: item,
+      })
+    }
+  })
+
+  return Array.from(fixedMap.values())
+    .sort((a, b) => b.block - a.block)
     .slice(0, MAX_ITEMS)
 }
 
 async function enrichRowsWithHash(rows) {
-  const cache = new Map()
   const result = []
 
   for (const row of rows) {
     let hash = row.hash
 
     if (!hash) {
-      if (!cache.has(row.block)) {
-        cache.set(row.block, await fetchTronBlockHash(row.block))
-      }
-      hash = cache.get(row.block) || ''
+      hash = await fetchTronBlockHash(row.block)
     }
 
     const parsed = hash ? parseHashOpenNumber(hash) : null
     const fallbackValue = Number.isInteger(row.platformNum) ? row.platformNum : null
     const value = parsed?.value ?? fallbackValue
 
+    if (value === null || !Number.isInteger(value)) continue
+
     result.push({
       block: row.block,
       hash,
       sourcePair: parsed?.sourcePair || '',
-      openCode: parsed?.openCode || (value !== null ? String(value).padStart(2, '0') : ''),
+      openCode: parsed?.openCode || String(value).padStart(2, '0'),
       value,
-      tail: value !== null ? Math.abs(value) % 10 : null,
+      tail: Math.abs(value) % 10,
       platformNum: Number.isInteger(row.platformNum) ? row.platformNum : null,
       wei: row.wei,
       playType: row.playType,
@@ -123,7 +145,7 @@ async function enrichRowsWithHash(rows) {
     })
   }
 
-  return result.filter((item) => item.value !== null && item.tail !== null)
+  return result
 }
 
 export async function GET() {
@@ -133,25 +155,29 @@ export async function GET() {
     const history = await enrichRowsWithHash(rows)
 
     if (!history.length) {
-      throw new Error('没有获取到哈希1分轮盘开奖记录')
+      throw new Error('没有获取到哈希1分轮盘固定开奖区块数据')
     }
 
     const latest = history[0]
-    const nextBlock = Number(latest.block || 0) + 20
 
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
       source: HX_HISTORY_URL,
       latest,
-      nextBlock,
+      nextBlock: Number(latest.block) + 20,
       history,
       updatedAt: new Date().toISOString(),
     })
   } catch (error) {
     return NextResponse.json(
-      { ok: false, message: error.message || '获取哈希1分轮盘数据失败' },
-      { status: 500 }
+      {
+        ok: false,
+        message: error.message || '获取哈希1分轮盘数据失败',
+      },
+      {
+        status: 500,
+      }
     )
   }
 }
