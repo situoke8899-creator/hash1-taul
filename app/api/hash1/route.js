@@ -4,13 +4,13 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const MAX_ITEMS = 220
-const TRON_GRID_V1 = 'https://api.trongrid.io/v1/blocks'
+const TRONSCAN_API = 'https://apilist.tronscanapi.com/api/block'
+const TRONSCAN_API_KEY = process.env.TRONSCAN_API_KEY || ''
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
 }
 
-// 从哈希末尾往前找两位连续数字，反转后 00-35 为开奖结果
 function parseHashOpenNumber(hash) {
   const text = String(hash || '').toLowerCase()
 
@@ -37,26 +37,40 @@ function parseHashOpenNumber(hash) {
   return null
 }
 
-async function fetchJson(url) {
-  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`, {
+async function fetchTronScan(url) {
+  if (!TRONSCAN_API_KEY) {
+    throw new Error('缺少 TRONSCAN_API_KEY，请先在 Vercel 环境变量里添加')
+  }
+
+  const res = await fetch(url, {
     cache: 'no-store',
     headers: {
       accept: 'application/json,text/plain,*/*',
       'user-agent': 'Mozilla/5.0',
+      'TRON-PRO-API-KEY': TRONSCAN_API_KEY,
     },
   })
 
   const text = await res.text()
 
-  if (!res.ok) throw new Error(`TronGrid接口失败：${url}`)
-  if (!text.trim()) throw new Error(`TronGrid接口返回空内容：${url}`)
-  if (text.trim().startsWith('<')) throw new Error(`TronGrid接口返回网页：${url}`)
+  if (!res.ok) {
+    throw new Error(`TronScan接口失败：${url}｜${res.status}`)
+  }
+
+  if (!text.trim()) {
+    throw new Error(`TronScan接口返回空内容：${url}`)
+  }
+
+  if (text.trim().startsWith('<')) {
+    throw new Error(`TronScan接口返回网页：${url}`)
+  }
 
   return JSON.parse(text)
 }
 
 function pickBlockItem(json) {
   if (Array.isArray(json?.data)) return json.data[0]
+  if (Array.isArray(json?.rows)) return json.rows[0]
   if (Array.isArray(json)) return json[0]
   return json
 }
@@ -64,10 +78,9 @@ function pickBlockItem(json) {
 function getBlockNumber(item) {
   return Number(
     item?.number ??
-    item?.block_number ??
+    item?.block ??
     item?.blockNumber ??
     item?.height ??
-    item?.block_header?.raw_data?.number ??
     0
   )
 }
@@ -75,38 +88,35 @@ function getBlockNumber(item) {
 function getBlockHash(item) {
   return String(
     item?.hash ??
+    item?.blockHash ??
     item?.blockID ??
     item?.blockId ??
-    item?.block_hash ??
     ''
   )
 }
 
 async function getLatestBlock() {
-  const json = await fetchJson(`${TRON_GRID_V1}/latest`)
-  const item = pickBlockItem(json)
+  const json = await fetchTronScan(
+    `${TRONSCAN_API}?sort=-number&limit=1&_t=${Date.now()}`
+  )
 
+  const item = pickBlockItem(json)
   const blockNumber = getBlockNumber(item)
-  const hash = getBlockHash(item)
 
   if (!Number.isInteger(blockNumber) || blockNumber <= 0) {
-    throw new Error('没有获取到波场最新区块号')
+    throw new Error('TronScan没有返回最新区块号')
   }
 
-  return {
-    blockNumber,
-    hash,
-  }
+  return blockNumber
 }
 
-async function getBlockByNumber(blockNumber) {
-  const json = await fetchJson(`${TRON_GRID_V1}/${Number(blockNumber)}`)
-  const item = pickBlockItem(json)
+async function getBlockHashByNumber(block) {
+  const json = await fetchTronScan(
+    `${TRONSCAN_API}?number=${Number(block)}&_t=${Date.now()}`
+  )
 
-  return {
-    block: Number(blockNumber),
-    hash: getBlockHash(item),
-  }
+  const item = pickBlockItem(json)
+  return getBlockHash(item)
 }
 
 async function mapLimit(items, limit, mapper) {
@@ -163,26 +173,16 @@ function buildPredictSix(history) {
     if (item.omit >= 15) item.score += 8
   })
 
-  const ranking = score.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score
-    if (b.count20 !== a.count20) return b.count20 - a.count20
-    if (b.omit !== a.omit) return b.omit - a.omit
-    return a.tail - b.tail
-  })
-
-  return ranking.slice(0, 6).map((item) => item.tail).sort((a, b) => a - b)
-}
-
-function calcCurrentMiss(history, tails, size) {
-  const set = new Set(tails)
-  let miss = 0
-
-  for (const item of history.slice(0, size)) {
-    if (set.has(item.tail)) break
-    miss += 1
-  }
-
-  return miss
+  return score
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score
+      if (b.count20 !== a.count20) return b.count20 - a.count20
+      if (b.omit !== a.omit) return b.omit - a.omit
+      return a.tail - b.tail
+    })
+    .slice(0, 6)
+    .map((item) => item.tail)
+    .sort((a, b) => a - b)
 }
 
 function testTails(history, tails, size) {
@@ -190,21 +190,28 @@ function testTails(history, tails, size) {
   const set = new Set(tails)
   const hitCount = source.filter((item) => set.has(item.tail)).length
 
+  let currentMiss = 0
+  for (const item of source) {
+    if (set.has(item.tail)) break
+    currentMiss += 1
+  }
+
   return {
     size,
     testedCount: source.length,
     hitCount,
-    hitRate: source.length ? Number(((hitCount / source.length) * 100).toFixed(2)) : 0,
-    currentMiss: calcCurrentMiss(history, tails, size),
+    hitRate: source.length
+      ? Number(((hitCount / source.length) * 100).toFixed(2))
+      : 0,
+    currentMiss,
   }
 }
 
 export async function GET() {
   try {
-    const latestBlock = await getLatestBlock()
-    const currentBlock = latestBlock.blockNumber
+    const currentBlock = await getLatestBlock()
 
-    // 只取区块号尾数为 00 / 20 / 40 / 60 / 80 的区块
+    // 只取 00 / 20 / 40 / 60 / 80 区块
     const latestFixedBlock = currentBlock - (currentBlock % 20)
     const nextBlock = latestFixedBlock + 20
     const remainBlocks = Math.max(0, nextBlock - currentBlock)
@@ -215,12 +222,10 @@ export async function GET() {
 
     const rawBlocks = await mapLimit(blocks, 6, async (block) => {
       try {
-        return await getBlockByNumber(block)
+        const hash = await getBlockHashByNumber(block)
+        return { block, hash }
       } catch {
-        return {
-          block,
-          hash: '',
-        }
+        return { block, hash: '' }
       }
     })
 
@@ -242,7 +247,7 @@ export async function GET() {
       .filter(Boolean)
 
     if (!history.length) {
-      throw new Error('没有解析到 00/20/40/60/80 固定开奖区块哈希')
+      throw new Error('没有解析到 00/20/40/60/80 固定区块哈希')
     }
 
     const predictedTails = buildPredictSix(history)
@@ -250,7 +255,7 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
-      source: 'trongrid-v1-blocks',
+      source: 'tronscan-api',
       currentBlock,
       latestFixedBlock,
       latest: history[0],
