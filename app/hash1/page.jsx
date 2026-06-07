@@ -510,7 +510,7 @@ export default function Hash1Page() {
                     <div className="tails" style={{ marginTop: 8 }}>{group.strategy.tails.map((tail) => <TailBadge key={tail} tail={tail} />)}</div>
                     <div className="mini-grid">
                       {group.rows.map((row) => (
-                        <div key={`${group.strategy.id}-${row.block}`} title={`区块 ${row.block}｜开 ${row.openCode}｜尾${row.tail}｜${row.hit ? '中奖' : '未中奖'}${row.backfilled ? '｜补冻结' : '｜真实冻结'}`} className={`mini-cell ${row.backfilled ? 'mini-backfill' : row.hit ? 'mini-hit' : 'mini-miss'}`}>
+                        <div key={`${group.strategy.id}-${row.block}`} title={`区块 ${row.block}｜开 ${row.openCode}｜尾${row.tail}｜${row.hit ? '中奖' : '未中奖'}${row.backfilled ? '｜补冻结' : '｜真实冻结'}`} className={`mini-cell ${row.hit ? 'mini-hit' : 'mini-miss'}`}>
                           {row.hit ? '中' : '未'}
                         </div>
                       ))}
