@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-const HX_HISTORY_URL = 'https://hx168.live/api/Game/GetLong?gameId=1'
+const HX_HISTORY_URL = 'https://hx168.live/api/Game/GetGameListByDate?gameId=1'
 const TRON_GRID_LATEST = 'https://api.trongrid.io/v1/blocks/latest'
 const MAX_ITEMS = 220
 
@@ -88,18 +88,32 @@ async function getCurrentTronBlock() {
 }
 
 function normalizeHxRows(json) {
-  const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : []
+  const rows =
+    Array.isArray(json?.list)
+      ? json.list
+      : Array.isArray(json?.data)
+      ? json.data
+      : Array.isArray(json)
+      ? json
+      : []
 
   return rows
     .map((item, index) => {
       const block = Number(item.block || item.blockNumber || item.height || 0)
       const hash = String(item.hash || item.blockHash || item.hashCode || item.block_hash || '')
       const parsed = hash ? parseHashOpenNumber(hash) : null
-      const rawNum = Number(item.num ?? item.openCode ?? item.result ?? NaN)
+
+      const rawNum = Number(
+        item.lastCode ??
+          item.num ??
+          item.openCode ??
+          item.result ??
+          NaN
+      )
+
       const value = parsed?.value ?? (Number.isInteger(rawNum) ? rawNum : null)
 
       if (!Number.isInteger(block) || block <= 0) return null
-      if (block % 20 !== 0) return null
       if (value === null || !Number.isInteger(value)) return null
 
       return {
@@ -111,7 +125,8 @@ function normalizeHxRows(json) {
         value,
         tail: Math.abs(value) % 10,
         parsedByHash: Boolean(parsed),
-        openTime: item.openTime || item.time || item.createTime || item.createdAt || '',
+        openTime: item.time || item.openTime || item.createTime || item.createdAt || '',
+        drawResult: item.drawResult || '',
       }
     })
     .filter(Boolean)
@@ -192,13 +207,38 @@ function testTails(history, tails, size) {
   }
 }
 
+function calcCountdown(latest, currentBlock, nextBlock) {
+  if (currentBlock > 0) {
+    const remainBlocks = Math.max(0, nextBlock - currentBlock)
+    return {
+      remainBlocks,
+      countdownSeconds: remainBlocks * 3,
+    }
+  }
+
+  const latestTime = new Date(latest.openTime || '').getTime()
+
+  if (Number.isFinite(latestTime) && latestTime > 0) {
+    const nextTime = latestTime + 60 * 1000
+    return {
+      remainBlocks: 0,
+      countdownSeconds: Math.max(0, Math.floor((nextTime - Date.now()) / 1000)),
+    }
+  }
+
+  return {
+    remainBlocks: 0,
+    countdownSeconds: 0,
+  }
+}
+
 export async function GET() {
   try {
     const hxJson = await fetchJson(HX_HISTORY_URL)
     const history = normalizeHxRows(hxJson)
 
     if (!history.length) {
-      throw new Error('没有获取到 hx168 固定开奖区块历史数据')
+      throw new Error('没有获取到 hx168 开奖历史数据')
     }
 
     const latest = history[0]
@@ -206,14 +246,7 @@ export async function GET() {
 
     const latestFixedBlock = latest.block
     const nextBlock = latest.block + 20
-
-    let remainBlocks = 0
-    let countdownSeconds = 0
-
-    if (currentBlock > 0) {
-      remainBlocks = Math.max(0, nextBlock - currentBlock)
-      countdownSeconds = remainBlocks * 3
-    }
+    const { remainBlocks, countdownSeconds } = calcCountdown(latest, currentBlock, nextBlock)
 
     const predictedTails = buildPredictSix(history)
 
