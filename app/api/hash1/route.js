@@ -3,9 +3,9 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
+const HX_HISTORY_URL = 'https://hx168.live/api/Game/GetLong?gameId=1'
+const TRON_GRID_LATEST = 'https://api.trongrid.io/v1/blocks/latest'
 const MAX_ITEMS = 220
-const TRONSCAN_API = 'https://apilist.tronscanapi.com/api/block'
-const TRONSCAN_API_KEY = process.env.TRONSCAN_API_KEY || ''
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
@@ -37,38 +37,25 @@ function parseHashOpenNumber(hash) {
   return null
 }
 
-async function fetchTronScan(url) {
-  if (!TRONSCAN_API_KEY) {
-    throw new Error('缺少 TRONSCAN_API_KEY，请先在 Vercel 环境变量里添加')
-  }
-
-  const res = await fetch(url, {
+async function fetchJson(url) {
+  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`, {
     cache: 'no-store',
     headers: {
       accept: 'application/json,text/plain,*/*',
       'user-agent': 'Mozilla/5.0',
-      'TRON-PRO-API-KEY': TRONSCAN_API_KEY,
     },
   })
 
   const text = await res.text()
 
-  if (!res.ok) {
-    throw new Error(`TronScan接口失败：${url}｜${res.status}`)
-  }
-
-  if (!text.trim()) {
-    throw new Error(`TronScan接口返回空内容：${url}`)
-  }
-
-  if (text.trim().startsWith('<')) {
-    throw new Error(`TronScan接口返回网页：${url}`)
-  }
+  if (!res.ok) throw new Error(`接口请求失败：${url}`)
+  if (!text.trim()) throw new Error(`接口返回空内容：${url}`)
+  if (text.trim().startsWith('<')) throw new Error(`接口返回网页：${url}`)
 
   return JSON.parse(text)
 }
 
-function pickBlockItem(json) {
+function pickFirst(json) {
   if (Array.isArray(json?.data)) return json.data[0]
   if (Array.isArray(json?.rows)) return json.rows[0]
   if (Array.isArray(json)) return json[0]
@@ -81,57 +68,55 @@ function getBlockNumber(item) {
     item?.block ??
     item?.blockNumber ??
     item?.height ??
+    item?.block_header?.raw_data?.number ??
     0
   )
 }
 
-function getBlockHash(item) {
-  return String(
-    item?.hash ??
-    item?.blockHash ??
-    item?.blockID ??
-    item?.blockId ??
-    ''
-  )
-}
+async function getCurrentTronBlock() {
+  try {
+    const json = await fetchJson(TRON_GRID_LATEST)
+    const item = pickFirst(json)
+    const block = getBlockNumber(item)
 
-async function getLatestBlock() {
-  const json = await fetchTronScan(
-    `${TRONSCAN_API}?sort=-number&limit=1&_t=${Date.now()}`
-  )
-
-  const item = pickBlockItem(json)
-  const blockNumber = getBlockNumber(item)
-
-  if (!Number.isInteger(blockNumber) || blockNumber <= 0) {
-    throw new Error('TronScan没有返回最新区块号')
-  }
-
-  return blockNumber
-}
-
-async function getBlockHashByNumber(block) {
-  const json = await fetchTronScan(
-    `${TRONSCAN_API}?number=${Number(block)}&_t=${Date.now()}`
-  )
-
-  const item = pickBlockItem(json)
-  return getBlockHash(item)
-}
-
-async function mapLimit(items, limit, mapper) {
-  const result = []
-  let index = 0
-
-  async function worker() {
-    while (index < items.length) {
-      const currentIndex = index++
-      result[currentIndex] = await mapper(items[currentIndex], currentIndex)
+    if (Number.isInteger(block) && block > 0) {
+      return block
     }
-  }
+  } catch {}
 
-  await Promise.all(Array.from({ length: limit }, worker))
-  return result
+  return 0
+}
+
+function normalizeHxRows(json) {
+  const rows = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : []
+
+  return rows
+    .map((item, index) => {
+      const block = Number(item.block || item.blockNumber || item.height || 0)
+      const hash = String(item.hash || item.blockHash || item.hashCode || item.block_hash || '')
+      const parsed = hash ? parseHashOpenNumber(hash) : null
+      const rawNum = Number(item.num ?? item.openCode ?? item.result ?? NaN)
+      const value = parsed?.value ?? (Number.isInteger(rawNum) ? rawNum : null)
+
+      if (!Number.isInteger(block) || block <= 0) return null
+      if (block % 20 !== 0) return null
+      if (value === null || !Number.isInteger(value)) return null
+
+      return {
+        index,
+        block,
+        hash,
+        sourcePair: parsed?.sourcePair || '',
+        openCode: parsed?.openCode || String(value).padStart(2, '0'),
+        value,
+        tail: Math.abs(value) % 10,
+        parsedByHash: Boolean(parsed),
+        openTime: item.openTime || item.time || item.createTime || item.createdAt || '',
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.block - a.block)
+    .slice(0, MAX_ITEMS)
 }
 
 function buildPredictSix(history) {
@@ -209,45 +194,25 @@ function testTails(history, tails, size) {
 
 export async function GET() {
   try {
-    const currentBlock = await getLatestBlock()
-
-    // 只取 00 / 20 / 40 / 60 / 80 区块
-    const latestFixedBlock = currentBlock - (currentBlock % 20)
-    const nextBlock = latestFixedBlock + 20
-    const remainBlocks = Math.max(0, nextBlock - currentBlock)
-
-    const blocks = Array.from({ length: MAX_ITEMS }, (_, index) => {
-      return latestFixedBlock - index * 20
-    })
-
-    const rawBlocks = await mapLimit(blocks, 6, async (block) => {
-      try {
-        const hash = await getBlockHashByNumber(block)
-        return { block, hash }
-      } catch {
-        return { block, hash: '' }
-      }
-    })
-
-    const history = rawBlocks
-      .map((item) => {
-        const parsed = parseHashOpenNumber(item.hash)
-        if (!parsed) return null
-
-        return {
-          block: item.block,
-          hash: item.hash,
-          sourcePair: parsed.sourcePair,
-          openCode: parsed.openCode,
-          value: parsed.value,
-          tail: parsed.tail,
-          parsedByHash: true,
-        }
-      })
-      .filter(Boolean)
+    const hxJson = await fetchJson(HX_HISTORY_URL)
+    const history = normalizeHxRows(hxJson)
 
     if (!history.length) {
-      throw new Error('没有解析到 00/20/40/60/80 固定区块哈希')
+      throw new Error('没有获取到 hx168 固定开奖区块历史数据')
+    }
+
+    const latest = history[0]
+    const currentBlock = await getCurrentTronBlock()
+
+    const latestFixedBlock = latest.block
+    const nextBlock = latest.block + 20
+
+    let remainBlocks = 0
+    let countdownSeconds = 0
+
+    if (currentBlock > 0) {
+      remainBlocks = Math.max(0, nextBlock - currentBlock)
+      countdownSeconds = remainBlocks * 3
     }
 
     const predictedTails = buildPredictSix(history)
@@ -255,13 +220,13 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
-      source: 'tronscan-api',
+      source: 'hx168-history + trongrid-current',
       currentBlock,
       latestFixedBlock,
-      latest: history[0],
+      latest,
       nextBlock,
       remainBlocks,
-      countdownSeconds: remainBlocks * 3,
+      countdownSeconds,
       predictedTails,
       predictStats: {
         20: testTails(history, predictedTails, 20),
@@ -276,7 +241,7 @@ export async function GET() {
     return NextResponse.json(
       {
         ok: false,
-        message: error.message || '获取波场区块数据失败',
+        message: error.message || '获取哈希1分轮盘数据失败',
       },
       { status: 500 }
     )
