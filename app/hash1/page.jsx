@@ -242,7 +242,7 @@ export default function Hash1Page() {
 
         <div className="toolbar">
           <button className="blue-btn" onClick={loadData}>{loading ? '刷新中...' : '刷新数据'}</button>
-          <span className="muted">数据源：hx168.live ｜ 更新时间：{data?.updatedAt ? new Date(data.updatedAt).toLocaleString() : '-'}</span>
+          <span className="muted">数据源：{data?.source || '-'} ｜ 更新时间：{data?.updatedAt ? new Date(data.updatedAt).toLocaleString() : '-'}</span>
         </div>
         {error && <div className="error">{error}</div>}
 
