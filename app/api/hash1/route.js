@@ -4,11 +4,11 @@ export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
 const MAX_ITEMS = 220
-
 const HX_URLS = [
   'https://hx168.live/api/Game/GetGameListByDate?gameId=1',
   'https://hx168.live/api/Game/GetGameLastList?status=2&gameId=1',
 ]
+const TRON_GRID_LATEST = 'https://api.trongrid.io/v1/blocks/latest'
 
 function isDigit(ch) {
   return ch >= '0' && ch <= '9'
@@ -46,6 +46,7 @@ async function fetchJson(url) {
     headers: {
       accept: 'application/json,text/plain,*/*',
       'user-agent': 'Mozilla/5.0',
+      referer: 'https://hx168.live/lottery-results',
     },
   })
 
@@ -58,37 +59,46 @@ async function fetchJson(url) {
   return JSON.parse(text)
 }
 
-async function fetchHxData() {
-  const errors = []
+function pickFirst(json) {
+  if (Array.isArray(json?.data)) return json.data[0]
+  if (Array.isArray(json?.rows)) return json.rows[0]
+  if (Array.isArray(json)) return json[0]
+  return json
+}
 
-  for (const url of HX_URLS) {
-    try {
-      const json = await fetchJson(url)
-      const rows = normalizeRows(json)
+function getBlockNumber(item) {
+  return Number(
+    item?.number ??
+      item?.block ??
+      item?.blockNumber ??
+      item?.height ??
+      item?.block_header?.raw_data?.number ??
+      0
+  )
+}
 
-      if (rows.length) {
-        return {
-          sourceUrl: url,
-          history: rows,
-        }
-      }
-    } catch (err) {
-      errors.push(err.message)
+async function getCurrentTronBlock() {
+  try {
+    const json = await fetchJson(TRON_GRID_LATEST)
+    const item = pickFirst(json)
+    const block = getBlockNumber(item)
+
+    if (Number.isInteger(block) && block > 0) {
+      return block
     }
-  }
+  } catch {}
 
-  throw new Error(errors[0] || '没有获取到开奖记录')
+  return 0
 }
 
 function normalizeRows(json) {
-  const rows =
-    Array.isArray(json?.list)
-      ? json.list
-      : Array.isArray(json?.data)
-      ? json.data
-      : Array.isArray(json)
-      ? json
-      : []
+  const rows = Array.isArray(json?.list)
+    ? json.list
+    : Array.isArray(json?.data)
+    ? json.data
+    : Array.isArray(json)
+    ? json
+    : []
 
   return rows
     .map((item, index) => {
@@ -97,11 +107,7 @@ function normalizeRows(json) {
       const parsed = hash ? parseHashOpenNumber(hash) : null
 
       const fallbackValue = Number(
-        item.lastCode ??
-          item.num ??
-          item.openCode ??
-          item.result ??
-          NaN
+        item.lastCode ?? item.num ?? item.openCode ?? item.result ?? NaN
       )
 
       const value = parsed?.value ?? (Number.isInteger(fallbackValue) ? fallbackValue : null)
@@ -127,6 +133,25 @@ function normalizeRows(json) {
     .slice(0, MAX_ITEMS)
 }
 
+async function fetchHxData() {
+  const errors = []
+
+  for (const url of HX_URLS) {
+    try {
+      const json = await fetchJson(url)
+      const history = normalizeRows(json)
+
+      if (history.length) {
+        return { sourceUrl: url, history }
+      }
+    } catch (error) {
+      errors.push(error.message)
+    }
+  }
+
+  throw new Error(errors[0] || '没有获取到开奖记录')
+}
+
 function testTails(history, tails, size) {
   const source = history.slice(0, size)
   const set = new Set(tails)
@@ -137,7 +162,7 @@ function testTails(history, tails, size) {
   let tempMiss = 0
 
   source.forEach((item, index) => {
-    const hit = set.has(item.tail)
+    const hit = set.has(Number(item.tail))
 
     if (hit) {
       hitCount += 1
@@ -236,9 +261,23 @@ function buildOptimizedStrategies(history) {
     }))
 }
 
-function buildPredictSix(history) {
-  const strategies = buildOptimizedStrategies(history)
-  return strategies[0]?.tails || [0, 1, 2, 3, 4, 5]
+function calcCountdown(latest, currentBlock, nextBlock) {
+  if (currentBlock > 0) {
+    const remainBlocks = Math.max(0, nextBlock - currentBlock)
+    return { remainBlocks, countdownSeconds: remainBlocks * 3 }
+  }
+
+  const latestTime = new Date(latest.openTime || '').getTime()
+
+  if (Number.isFinite(latestTime) && latestTime > 0) {
+    const nextTime = latestTime + 60 * 1000
+    return {
+      remainBlocks: 0,
+      countdownSeconds: Math.max(0, Math.floor((nextTime - Date.now()) / 1000)),
+    }
+  }
+
+  return { remainBlocks: 0, countdownSeconds: 0 }
 }
 
 export async function GET() {
@@ -251,16 +290,21 @@ export async function GET() {
 
     const latest = history[0]
     const nextBlock = latest.block + 20
+    const currentBlock = await getCurrentTronBlock()
+    const { remainBlocks, countdownSeconds } = calcCountdown(latest, currentBlock, nextBlock)
     const optimizedStrategies = buildOptimizedStrategies(history)
-    const predictedTails = optimizedStrategies[0]?.tails || buildPredictSix(history)
+    const predictedTails = optimizedStrategies[0]?.tails || [0, 1, 2, 3, 4, 5]
 
     return NextResponse.json({
       ok: true,
       play: 'hash1-wheel',
       source: sourceUrl,
-      latest,
+      currentBlock,
       latestFixedBlock: latest.block,
+      latest,
       nextBlock,
+      remainBlocks,
+      countdownSeconds,
       predictedTails,
       optimizedStrategies,
       predictStats: {
