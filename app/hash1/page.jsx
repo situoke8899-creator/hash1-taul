@@ -163,7 +163,7 @@ function TailBadge({ tail, active = true }) {
 }
 
 function freezeKey(block) {
-  return `hash1-prediction-${block}`
+  return `hash1-v21-37-prediction-${block}`
 }
 
 function safeParse(raw) {
@@ -317,7 +317,7 @@ export default function Hash1Page() {
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [betAmount, setBetAmount] = useState(100)
-  const [odds, setOdds] = useState(36)
+  const [odds, setOdds] = useState(37)
   const [selectedStrategyId, setSelectedStrategyId] = useState('s1')
   const [frozenRecords, setFrozenRecords] = useState([])
   const [strategyFreezeStats, setStrategyFreezeStats] = useState([])
@@ -393,7 +393,7 @@ export default function Hash1Page() {
   }, [history, strategies])
 
   async function copyTails() {
-    const text = `第${data?.nextBlock || '-'}区块 6尾参考：${prediction.tails.join(' ')}`
+    const text = `第${data?.nextBlock || '-'}区块 37号码版 6尾参考：${prediction.tails.join(' ')}`
     try {
       await navigator.clipboard.writeText(text)
       setCopied(true)
@@ -414,8 +414,8 @@ export default function Hash1Page() {
       <div className="wrap">
         <section className="hero">
           <div className="card">
-            <h1>哈希1分轮盘尾号统计系统</h1>
-            <p className="muted">抓取哈希1分轮盘区块数据，按“从哈希末尾往前找两位连续数字，并反转成 00-35 以内号码”的规则解析开奖结果，再统计尾号热度、遗漏和下一期6尾参考。</p>
+            <h1>哈希1分轮盘尾号统计系统｜37号码版</h1>
+            <p className="muted">抓取哈希1分轮盘区块数据，按“从哈希末尾往前找两位连续数字，并反转成 00-36 以内号码”的规则解析开奖结果，再统计尾号热度、遗漏和下一期6尾参考。</p>
             <div className="stats">
               {WINDOWS.map((size) => (
                 <div className="stat" key={size}>
@@ -435,7 +435,7 @@ export default function Hash1Page() {
               <div className="box"><div className="label">尾号</div><div className="value">{latest?.tail ?? '-'}</div></div>
             </div>
             <p className="muted">下一开奖区块参考：{data?.nextBlock || '-'}</p>
-            <p className="muted">倒计时：{data?.countdownSeconds ?? '-'} 秒</p>
+            <p className="muted">开奖范围：{data?.openRange || '00-36'} ｜ 倒计时：{data?.countdownSeconds ?? '-'} 秒</p>
             <p className="hash">{latest?.hash || '接口暂未返回区块哈希时，会使用平台开奖结果作为备用统计。'}</p>
           </div>
         </section>
