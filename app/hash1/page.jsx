@@ -341,10 +341,10 @@ export default function Hash1Page() {
     // 页面首次打开时立即加载一次
     loadData()
 
-    // 每30秒自动刷新一次
+    // 每5秒自动刷新一次
     const timer = setInterval(() => {
       loadData()
-    }, 30000)
+    }, 5000)
 
     // 页面离开时清除定时器，避免重复刷新
     return () => clearInterval(timer)
@@ -453,7 +453,7 @@ export default function Hash1Page() {
 
         <div className="toolbar">
           <button className="blue-btn" onClick={loadData}>{loading ? '刷新中...' : '刷新数据'}</button>
-          <span className="muted">数据源：{data?.source || '-'} ｜ 更新时间：{data?.updatedAt ? new Date(data.updatedAt).toLocaleString() : '-'} ｜ 每30秒自动刷新</span>
+          <span className="muted">数据源：{data?.source || '-'} ｜ 更新时间：{data?.updatedAt ? new Date(data.updatedAt).toLocaleString() : '-'} ｜ 每5秒自动刷新</span>
         </div>
         {error && <div className="error">{error}</div>}
 
