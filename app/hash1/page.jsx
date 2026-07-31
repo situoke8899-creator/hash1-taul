@@ -311,6 +311,109 @@ function buildStrategyFreezeStats(history, strategies) {
   })
 }
 
+
+function buildFrozenStatsBySize(history, strategy, strategies, size) {
+  if (!strategy || !Array.isArray(history) || !history.length) {
+    return {
+      rows: [],
+      testedCount: 0,
+      hitCount: 0,
+      hitRate: 0,
+      maxMiss: 0,
+      currentMiss: 0,
+    }
+  }
+
+  const rows = history.slice(0, size).map((draw) => {
+    const frozen = getOrCreatePredictionForBlock(draw, strategies)
+    const frozenStrategy =
+      frozen?.strategies?.find((item) => item.id === strategy.id) ||
+      compactStrategy(strategy)
+
+    const hit = (frozenStrategy.tails || []).includes(Number(draw.tail))
+
+    return {
+      block: draw.block,
+      openCode: draw.openCode,
+      tail: Number(draw.tail),
+      tails: frozenStrategy.tails || [],
+      hit,
+      backfilled: Boolean(
+        frozen?.backfilled ||
+        frozenStrategy.backfilledStrategy
+      ),
+    }
+  })
+
+  const results = rows.map((row) => row.hit)
+  const testedCount = rows.length
+  const hitCount = rows.filter((row) => row.hit).length
+
+  return {
+    rows,
+    testedCount,
+    hitCount,
+    hitRate: testedCount
+      ? (hitCount / testedCount) * 100
+      : 0,
+    maxMiss: calcMaxMiss(results),
+    currentMiss: calcCurrentMiss(results),
+  }
+}
+
+function buildBestFrozenSixTailStrategy(history, strategies) {
+  if (!Array.isArray(strategies) || !strategies.length) return null
+
+  const ranked = strategies.map((strategy) => {
+    const frozen20 = buildFrozenStatsBySize(
+      history,
+      strategy,
+      strategies,
+      20
+    )
+    const frozen30 = buildFrozenStatsBySize(
+      history,
+      strategy,
+      strategies,
+      30
+    )
+    const frozen50 = buildFrozenStatsBySize(
+      history,
+      strategy,
+      strategies,
+      50
+    )
+
+    // 只使用用户指定的20、30、50期冻结记录。
+    // 最近20期权重最高，同时扣除连错，避免只看单一命中率。
+    const score =
+      frozen20.hitRate * 0.5 +
+      frozen30.hitRate * 0.3 +
+      frozen50.hitRate * 0.2 -
+      frozen20.maxMiss * 1.2 -
+      frozen20.currentMiss * 0.6
+
+    return {
+      strategy,
+      frozen20,
+      frozen30,
+      frozen50,
+      score: Number(score.toFixed(3)),
+    }
+  })
+
+  return ranked.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    if (b.frozen20.hitRate !== a.frozen20.hitRate) {
+      return b.frozen20.hitRate - a.frozen20.hitRate
+    }
+    if (b.frozen30.hitRate !== a.frozen30.hitRate) {
+      return b.frozen30.hitRate - a.frozen30.hitRate
+    }
+    return a.frozen20.maxMiss - b.frozen20.maxMiss
+  })[0]
+}
+
 export default function Hash1Page() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -321,6 +424,7 @@ export default function Hash1Page() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('s1')
   const [frozenRecords, setFrozenRecords] = useState([])
   const [strategyFreezeStats, setStrategyFreezeStats] = useState([])
+  const [bestCopied, setBestCopied] = useState(false)
 
   async function loadData() {
     setLoading(true)
@@ -381,6 +485,16 @@ export default function Hash1Page() {
   const selectedStrategy =
     strategies.find((item) => item.id === selectedStrategyId) || strategies[0]
 
+
+  const bestFrozenStrategy = useMemo(() => {
+    if (!history.length || !strategies.length) return null
+
+    return buildBestFrozenSixTailStrategy(
+      history,
+      strategies
+    )
+  }, [history, strategies])
+
   const amountNumber = Number(betAmount || 0)
   const oddsNumber = Number(odds || 0)
   const totalBet = amountNumber * 6
@@ -403,6 +517,27 @@ export default function Hash1Page() {
     setStrategyFreezeStats(buildStrategyFreezeStats(history, strategies))
   }, [history, strategies])
 
+  async function copyBestFrozenStrategy() {
+    if (!bestFrozenStrategy?.strategy) return
+
+    const item = bestFrozenStrategy
+    const text = [
+      `最优6尾：${item.strategy.name}`,
+      `尾数：${item.strategy.tails.join(' ')}`,
+      `冻结20期：${fmtPercent(item.frozen20.hitRate)}（${item.frozen20.hitCount}/${item.frozen20.testedCount}）`,
+      `冻结30期：${fmtPercent(item.frozen30.hitRate)}（${item.frozen30.hitCount}/${item.frozen30.testedCount}）`,
+      `冻结50期：${fmtPercent(item.frozen50.hitRate)}（${item.frozen50.hitCount}/${item.frozen50.testedCount}）`,
+    ].join('｜')
+
+    try {
+      await navigator.clipboard.writeText(text)
+      setBestCopied(true)
+      setTimeout(() => setBestCopied(false), 1500)
+    } catch {
+      alert(text)
+    }
+  }
+
   async function copyTails() {
     const text = `第${data?.nextBlock || '-'}区块 37号码版 6尾参考：${prediction.tails.join(' ')}`
     try {
@@ -419,7 +554,7 @@ export default function Hash1Page() {
   return (
     <main className="page">
       <style jsx global>{`
-        *{box-sizing:border-box}body{margin:0;background:#07111f;color:#e5edf7;font-family:Arial,'Microsoft YaHei',sans-serif}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at top,#17365e 0%,#07111f 45%,#050914 100%)}.wrap{max-width:1240px;margin:0 auto}.hero{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;margin-bottom:18px}.card{background:rgba(15,27,48,.92);border:1px solid rgba(148,163,184,.22);border-radius:18px;box-shadow:0 18px 40px rgba(0,0,0,.28);padding:22px;margin-bottom:18px}.card h1{font-size:34px;margin:0 0 10px}.card h2{font-size:22px;margin:0 0 14px}.muted{color:#9fb2cc;line-height:1.7}.latest-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.box{padding:14px;border-radius:14px;background:rgba(2,6,23,.34);border:1px solid rgba(148,163,184,.15)}.label{font-size:13px;color:#9fb2cc;margin-bottom:7px}.value{font-size:26px;font-weight:900}.hash{font-family:monospace;word-break:break-all;color:#bfdbfe}.tails{display:flex;gap:8px;flex-wrap:wrap}.tail{display:inline-flex;width:34px;height:34px;border-radius:11px;align-items:center;justify-content:center;background:#1e293b;border:1px solid #334155;color:#cbd5e1;font-weight:900}.tail.active{background:#22c55e;border-color:#86efac;color:#052e16}.btn{border:none;border-radius:12px;padding:12px 16px;background:linear-gradient(145deg,#fde047,#f97316);color:#111827;font-weight:900;cursor:pointer}.blue-btn{background:#38bdf8;border:none;border-radius:999px;padding:10px 16px;font-weight:900;cursor:pointer;color:#07111f}.toolbar{display:flex;gap:12px;align-items:center;margin-bottom:18px}.grid{display:grid;grid-template-columns:1.35fr .8fr;gap:18px;align-items:start}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.stat{padding:14px;border-radius:14px;background:rgba(2,6,23,.34);border:1px solid rgba(148,163,184,.15)}.stat strong{font-size:22px;color:#4ade80}table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid rgba(148,163,184,.16);text-align:left;font-size:14px}th{color:#9fb2cc;background:rgba(2,6,23,.28)}.good{color:#4ade80;font-weight:900}.mid{color:#facc15;font-weight:900}.bad{color:#fb7185;font-weight:900}.heat-row{display:grid;grid-template-columns:42px 1fr 80px;gap:10px;align-items:center;margin:10px 0}.bar{height:10px;border-radius:999px;background:#1e293b;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#22c55e);border-radius:999px}.records{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.record{padding:12px;border-radius:12px;background:rgba(2,6,23,.32);border:1px solid rgba(148,163,184,.12)}.record-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}.error{padding:16px;border-radius:14px;background:rgba(239,68,68,.14);color:#fecaca;border:1px solid rgba(248,113,113,.3);margin-bottom:18px}.input{width:100%;padding:12px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:16px}.mini-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:6px;margin-top:12px}.mini-cell{height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff;font-size:12px}.mini-hit{background:rgba(34,197,94,.9)}.mini-miss{background:rgba(239,68,68,.9)}.mini-backfill{background:#334155}@media(max-width:950px){.hero,.grid{display:block}.stats,.latest-grid,.records{grid-template-columns:1fr}.page{padding:16px}}
+        *{box-sizing:border-box}body{margin:0;background:#07111f;color:#e5edf7;font-family:Arial,'Microsoft YaHei',sans-serif}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at top,#17365e 0%,#07111f 45%,#050914 100%)}.wrap{max-width:1240px;margin:0 auto}.hero{display:grid;grid-template-columns:1.2fr .8fr;gap:18px;margin-bottom:18px}.card{background:rgba(15,27,48,.92);border:1px solid rgba(148,163,184,.22);border-radius:18px;box-shadow:0 18px 40px rgba(0,0,0,.28);padding:22px;margin-bottom:18px}.card h1{font-size:34px;margin:0 0 10px}.card h2{font-size:22px;margin:0 0 14px}.muted{color:#9fb2cc;line-height:1.7}.latest-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.box{padding:14px;border-radius:14px;background:rgba(2,6,23,.34);border:1px solid rgba(148,163,184,.15)}.label{font-size:13px;color:#9fb2cc;margin-bottom:7px}.value{font-size:26px;font-weight:900}.hash{font-family:monospace;word-break:break-all;color:#bfdbfe}.tails{display:flex;gap:8px;flex-wrap:wrap}.tail{display:inline-flex;width:34px;height:34px;border-radius:11px;align-items:center;justify-content:center;background:#1e293b;border:1px solid #334155;color:#cbd5e1;font-weight:900}.tail.active{background:#22c55e;border-color:#86efac;color:#052e16}.btn{border:none;border-radius:12px;padding:12px 16px;background:linear-gradient(145deg,#fde047,#f97316);color:#111827;font-weight:900;cursor:pointer}.blue-btn{background:#38bdf8;border:none;border-radius:999px;padding:10px 16px;font-weight:900;cursor:pointer;color:#07111f}.toolbar{display:flex;gap:12px;align-items:center;margin-bottom:18px}.grid{display:grid;grid-template-columns:1.35fr .8fr;gap:18px;align-items:start}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.stat{padding:14px;border-radius:14px;background:rgba(2,6,23,.34);border:1px solid rgba(148,163,184,.15)}.stat strong{font-size:22px;color:#4ade80}table{width:100%;border-collapse:collapse}th,td{padding:12px 10px;border-bottom:1px solid rgba(148,163,184,.16);text-align:left;font-size:14px}th{color:#9fb2cc;background:rgba(2,6,23,.28)}.good{color:#4ade80;font-weight:900}.mid{color:#facc15;font-weight:900}.bad{color:#fb7185;font-weight:900}.heat-row{display:grid;grid-template-columns:42px 1fr 80px;gap:10px;align-items:center;margin:10px 0}.bar{height:10px;border-radius:999px;background:#1e293b;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,#38bdf8,#22c55e);border-radius:999px}.records{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.record{padding:12px;border-radius:12px;background:rgba(2,6,23,.32);border:1px solid rgba(148,163,184,.12)}.record-top{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}.error{padding:16px;border-radius:14px;background:rgba(239,68,68,.14);color:#fecaca;border:1px solid rgba(248,113,113,.3);margin-bottom:18px}.input{width:100%;padding:12px;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:16px}.mini-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:6px;margin-top:12px}.mini-cell{height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff;font-size:12px}.mini-hit{background:rgba(34,197,94,.9)}.mini-miss{background:rgba(239,68,68,.9)}.mini-backfill{background:#334155}.best-frozen-panel{margin-top:14px;padding:14px;border-radius:14px;background:rgba(34,197,94,.08);border:1px solid rgba(74,222,128,.36)}.best-frozen-head{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.best-frozen-title{font-size:18px;font-weight:900;color:#86efac}.best-frozen-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}.best-frozen-stat{padding:10px;border-radius:11px;background:rgba(2,6,23,.35);border:1px solid rgba(148,163,184,.15)}.best-frozen-stat strong{display:block;font-size:19px;color:#4ade80;margin-top:3px}.best-rank{display:inline-flex;padding:4px 9px;border-radius:999px;background:#22c55e;color:#052e16;font-weight:900;margin-left:6px}@media(max-width:950px){.best-frozen-stats{grid-template-columns:1fr}}@media(max-width:950px){.hero,.grid{display:block}.stats,.latest-grid,.records{grid-template-columns:1fr}.page{padding:16px}}
       `}</style>
 
       <div className="wrap">
@@ -427,6 +562,87 @@ export default function Hash1Page() {
           <div className="card">
             <h1>哈希1分轮盘尾号统计系统｜37号码版</h1>
             <p className="muted">抓取哈希1分轮盘区块数据，按“从哈希末尾往前找两位连续数字，并反转成 00-36 以内号码”的规则解析开奖结果，再统计尾号热度、遗漏和下一期6尾参考。</p>
+
+            <div className="best-frozen-panel">
+              {bestFrozenStrategy ? (
+                <>
+                  <div className="best-frozen-head">
+                    <div>
+                      <div className="best-frozen-title">
+                        当前冻结最优6尾方案
+                        <span className="best-rank">
+                          {bestFrozenStrategy.strategy.name}
+                        </span>
+                      </div>
+                      <div className="muted">
+                        只按冻结20、30、50期命中记录综合排名
+                      </div>
+                    </div>
+
+                    <button
+                      className="btn"
+                      onClick={copyBestFrozenStrategy}
+                    >
+                      {bestCopied ? '已复制' : '复制最优方案'}
+                    </button>
+                  </div>
+
+                  <div className="tails" style={{marginTop:12}}>
+                    {bestFrozenStrategy.strategy.tails.map((tail) => (
+                      <TailBadge key={tail} tail={tail} />
+                    ))}
+                  </div>
+
+                  <div className="best-frozen-stats">
+                    <div className="best-frozen-stat">
+                      <div className="label">冻结近20期</div>
+                      <strong>
+                        {fmtPercent(bestFrozenStrategy.frozen20.hitRate)}
+                      </strong>
+                      <div className="muted">
+                        {bestFrozenStrategy.frozen20.hitCount}/
+                        {bestFrozenStrategy.frozen20.testedCount}
+                        ｜连错{bestFrozenStrategy.frozen20.currentMiss}
+                      </div>
+                    </div>
+
+                    <div className="best-frozen-stat">
+                      <div className="label">冻结近30期</div>
+                      <strong>
+                        {fmtPercent(bestFrozenStrategy.frozen30.hitRate)}
+                      </strong>
+                      <div className="muted">
+                        {bestFrozenStrategy.frozen30.hitCount}/
+                        {bestFrozenStrategy.frozen30.testedCount}
+                        ｜连错{bestFrozenStrategy.frozen30.currentMiss}
+                      </div>
+                    </div>
+
+                    <div className="best-frozen-stat">
+                      <div className="label">冻结近50期</div>
+                      <strong>
+                        {fmtPercent(bestFrozenStrategy.frozen50.hitRate)}
+                      </strong>
+                      <div className="muted">
+                        {bestFrozenStrategy.frozen50.hitCount}/
+                        {bestFrozenStrategy.frozen50.testedCount}
+                        ｜连错{bestFrozenStrategy.frozen50.currentMiss}
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className="muted" style={{marginBottom:0}}>
+                    下一期开奖前，全部方案会按原有冻结机制保存；
+                    开奖后该最优方案对应期数只追加“中/未中”，以后刷新不会改写。
+                  </p>
+                </>
+              ) : (
+                <div className="muted">
+                  等待历史数据与冻结记录加载……
+                </div>
+              )}
+            </div>
+
             <div className="stats">
               {WINDOWS.map((size) => (
                 <div className="stat" key={size}>
