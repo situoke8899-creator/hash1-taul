@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const WINDOWS = [20, 50, 100, 200]
 
@@ -185,12 +185,29 @@ function compactStrategy(strategy) {
 
 function readFrozenPrediction(block) {
   if (typeof window === 'undefined' || !block) return null
-  return safeParse(window.localStorage.getItem(freezeKey(block)))
+
+  try {
+    return safeParse(
+      window.localStorage.getItem(freezeKey(block))
+    )
+  } catch {
+    return null
+  }
 }
 
 function saveFrozenPrediction(record) {
   if (typeof window === 'undefined' || !record?.block) return record
-  window.localStorage.setItem(freezeKey(record.block), JSON.stringify(record))
+
+  try {
+    window.localStorage.setItem(
+      freezeKey(record.block),
+      JSON.stringify(record)
+    )
+  } catch {
+    // 浏览器隐私模式、储存空间不足或禁止localStorage时，
+    // 不让页面因此发生客户端崩溃。
+  }
+
   return record
 }
 
@@ -325,7 +342,8 @@ function buildFrozenStatsBySize(history, strategy, strategies, size) {
   }
 
   const rows = history.slice(0, size).map((draw) => {
-    const frozen = getOrCreatePredictionForBlock(draw, strategies)
+    // 这里只读取已经同步好的冻结记录，禁止在React渲染阶段写localStorage。
+    const frozen = readFrozenPrediction(draw.block)
     const frozenStrategy =
       frozen?.strategies?.find((item) => item.id === strategy.id) ||
       compactStrategy(strategy)
@@ -424,20 +442,38 @@ export default function Hash1Page() {
   const [selectedStrategyId, setSelectedStrategyId] = useState('s1')
   const [frozenRecords, setFrozenRecords] = useState([])
   const [strategyFreezeStats, setStrategyFreezeStats] = useState([])
+  const [bestFrozenStrategy, setBestFrozenStrategy] = useState(null)
   const [bestCopied, setBestCopied] = useState(false)
+  const requestInFlight = useRef(false)
 
   async function loadData() {
+    if (requestInFlight.current) return
+
+    requestInFlight.current = true
     setLoading(true)
     setError('')
     try {
       const res = await fetch('/api/hash1', { cache: 'no-store' })
-      const json = await res.json()
-      if (!res.ok || !json.ok) throw new Error(json.message || '接口请求失败')
+      const responseText = await res.text()
+
+      if (responseText.trim().startsWith('<')) {
+        throw new Error(
+          `/api/hash1 返回网页而不是JSON（HTTP ${res.status}）`
+        )
+      }
+
+      const json = JSON.parse(responseText)
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.message || '接口请求失败')
+      }
+
       setData(json)
     } catch (err) {
       setError(err.message || '加载失败')
     } finally {
       setLoading(false)
+      requestInFlight.current = false
     }
   }
 
@@ -486,15 +522,6 @@ export default function Hash1Page() {
     strategies.find((item) => item.id === selectedStrategyId) || strategies[0]
 
 
-  const bestFrozenStrategy = useMemo(() => {
-    if (!history.length || !strategies.length) return null
-
-    return buildBestFrozenSixTailStrategy(
-      history,
-      strategies
-    )
-  }, [history, strategies])
-
   const amountNumber = Number(betAmount || 0)
   const oddsNumber = Number(odds || 0)
   const totalBet = amountNumber * 6
@@ -508,14 +535,50 @@ export default function Hash1Page() {
   }, [data, strategies])
 
   useEffect(() => {
-    if (!history.length || !selectedStrategy || !strategies.length) return
-    setFrozenRecords(buildFrozenRowsForStrategy(history.slice(0, 50), selectedStrategy, strategies))
-  }, [history, selectedStrategy, strategies])
+    if (!history.length || !strategies.length) {
+      setFrozenRecords([])
+      setStrategyFreezeStats([])
+      setBestFrozenStrategy(null)
+      return
+    }
 
-  useEffect(() => {
-    if (!history.length || !strategies.length) return
-    setStrategyFreezeStats(buildStrategyFreezeStats(history, strategies))
-  }, [history, strategies])
+    try {
+      // 先在Effect内统一同步最近50期冻结记录。
+      // 这样不会在React渲染/useMemo阶段写localStorage。
+      history.slice(0, 50).forEach((draw) => {
+        getOrCreatePredictionForBlock(draw, strategies)
+      })
+
+      const freezeStats = buildStrategyFreezeStats(
+        history,
+        strategies
+      )
+
+      setStrategyFreezeStats(freezeStats)
+
+      setBestFrozenStrategy(
+        buildBestFrozenSixTailStrategy(
+          history,
+          strategies
+        )
+      )
+
+      if (selectedStrategy) {
+        setFrozenRecords(
+          buildFrozenRowsForStrategy(
+            history.slice(0, 50),
+            selectedStrategy,
+            strategies
+          )
+        )
+      } else {
+        setFrozenRecords([])
+      }
+    } catch (err) {
+      console.error('冻结记录同步失败：', err)
+      setBestFrozenStrategy(null)
+    }
+  }, [history, selectedStrategy, strategies])
 
   async function copyBestFrozenStrategy() {
     if (!bestFrozenStrategy?.strategy) return
